@@ -1194,6 +1194,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		in.LANKeyID = cur.LANKeyID
 		in.Port = cur.Port                                 // set on its own (port below), which moves the gateway
 		in.CORSOrigins = cur.CORSOrigins                   // set on its own (cors below)
+		in.M365, in.M365KeyID = cur.M365, cur.M365KeyID    // set on its own (m365 below)
 		in.AllowIPs = cur.AllowIPs                         // set on its own (allowips below)
 		in.GitHubToken = cur.GitHubToken                   // set on its own (github-token below), never sent to the page
 		in.RequestArchive = cur.RequestArchive             // the Gateway page's, set on its own

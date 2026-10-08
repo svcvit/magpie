@@ -139,6 +139,8 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 		LANKeyID:             "lan-key-id",
 		Port:                 3591,
 		CORSOrigins:          []string{"http://localhost:3000"},
+		M365:                 true,
+		M365KeyID:            "m365-key-id",
 		AllowIPs:             []string{"203.0.113.7"},
 		GitHubToken:          "ghp_kept",
 		RequestArchive:       true,
