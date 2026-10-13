@@ -107,7 +107,9 @@ func prepareM365Certificate(ctx context.Context, f m365CertificateFiles) error {
 func RemoveM365Certificate(ctx context.Context) (M365CertificateStatus, error) {
 	f := m365CertificatePaths()
 	status := M365Certificate()
-	if !status.Ready || !status.Trusted {
+	// An older Magpie may have installed an otherwise valid but unconstrained
+	// CA. M365Certificate calls that not ready; it still has to be removed.
+	if !m365CertificateTrusted(f.caCert) {
 		return status, nil
 	}
 	name, args, err := m365TrustCommand(ctx, runtime.GOOS, false, f.caCert)
@@ -178,6 +180,7 @@ func ensureM365Certificate(f m365CertificateFiles) error {
 		MaxPathLen:                  0,
 		PermittedDNSDomainsCritical: true,
 		PermittedDNSDomains:         []string{"localhost"},
+		ExcludedDNSDomains:          []string{".localhost"},
 		PermittedIPRanges:           []*net.IPNet{ipv4, ipv6},
 	}
 	caDER, err := x509.CreateCertificate(rand.Reader, caTpl, caTpl, &caKey.PublicKey, caKey)
@@ -244,7 +247,7 @@ func m365CertificateFilesValid(f m365CertificateFiles) bool {
 }
 
 func m365CAConstrained(ca *x509.Certificate) bool {
-	if !ca.PermittedDNSDomainsCritical || len(ca.PermittedDNSDomains) != 1 || ca.PermittedDNSDomains[0] != "localhost" || len(ca.PermittedIPRanges) != 2 {
+	if !ca.PermittedDNSDomainsCritical || len(ca.PermittedDNSDomains) != 1 || ca.PermittedDNSDomains[0] != "localhost" || len(ca.ExcludedDNSDomains) != 1 || ca.ExcludedDNSDomains[0] != ".localhost" || len(ca.PermittedIPRanges) != 2 {
 		return false
 	}
 	want := map[string]bool{"127.0.0.1/32": false, "::1/128": false}

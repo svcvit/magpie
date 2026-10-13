@@ -47,8 +47,8 @@ func TestM365CertificateCoversOnlyLoopbackAndKeepsNoCAKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ca.PermittedDNSDomainsCritical || len(ca.PermittedDNSDomains) != 1 || ca.PermittedDNSDomains[0] != "localhost" {
-		t.Fatalf("CA DNS constraints: critical=%v domains=%v", ca.PermittedDNSDomainsCritical, ca.PermittedDNSDomains)
+	if !ca.PermittedDNSDomainsCritical || len(ca.PermittedDNSDomains) != 1 || ca.PermittedDNSDomains[0] != "localhost" || len(ca.ExcludedDNSDomains) != 1 || ca.ExcludedDNSDomains[0] != ".localhost" {
+		t.Fatalf("CA DNS constraints: critical=%v permitted=%v excluded=%v", ca.PermittedDNSDomainsCritical, ca.PermittedDNSDomains, ca.ExcludedDNSDomains)
 	}
 	wantNetworks := map[string]bool{"127.0.0.1/32": false, "::1/128": false}
 	for _, network := range ca.PermittedIPRanges {
