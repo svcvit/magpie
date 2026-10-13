@@ -15,6 +15,11 @@ import (
 
 const m365KeyName = "Claude for Microsoft 365"
 
+var (
+	removeM365Certificate = gateway.RemoveM365Certificate
+	restartM365Gateway    = restartGateway
+)
+
 // ensureM365Key keeps one named, revocable key for the Office add-in. Its
 // credential remains in caller-keys.json and is returned only by the explicit
 // copy route.
@@ -48,6 +53,15 @@ func ensureM365Key(s *settings.Settings) error {
 	return nil
 }
 
+func setM365Off(ctx context.Context, s *settings.Settings) error {
+	if _, err := removeM365Certificate(ctx); err != nil {
+		return err
+	}
+	s.M365 = false
+	s.CORSOrigins = slices.DeleteFunc(s.CORSOrigins, func(origin string) bool { return origin == gateway.M365Origin })
+	return settings.Save(*s)
+}
+
 func m365Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/settings/m365", func(w http.ResponseWriter, r *http.Request) {
 		var in struct{ On bool }
@@ -61,6 +75,9 @@ func m365Routes(mux *http.ServeMux) {
 		}
 		s := settings.Load()
 		if in.On {
+			// Clear an earlier failure so the new start attempt reports only
+			// its own result.
+			m365.ClearError()
 			if err := ensureM365Key(&s); err != nil {
 				fail(w, err)
 				return
@@ -68,23 +85,36 @@ func m365Routes(mux *http.ServeMux) {
 			if !slices.Contains(s.CORSOrigins, gateway.M365Origin) {
 				s.CORSOrigins = append(s.CORSOrigins, gateway.M365Origin)
 			}
+		} else {
+			// This origin and trust anchor exist only for this integration.
+			// Remove both before reporting the setting as off.
+			if err := setM365Off(r.Context(), &s); err != nil {
+				fail(w, err)
+				return
+			}
 		}
 		s.M365 = in.On
-		if err := settings.Save(s); err != nil {
-			fail(w, err)
-			return
+		if in.On {
+			if err := settings.Save(s); err != nil {
+				fail(w, err)
+				return
+			}
 		}
 		// Stop the old HTTPS listener before the gateway restart starts the
 		// replacement, so its fixed loopback port is already free.
 		c, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_ = m365.Stop(c)
 		cancel()
-		if out := restartGateway(); !out.OK {
+		if out := restartM365Gateway(); !out.OK {
 			fail(w, errors.New("the gateway could not restart: "+out.Reason+" "+out.Error))
 			return
 		}
 		if in.On && !m365.Status().Running {
-			fail(w, errors.New(m365.Status().Error))
+			startErr := m365.Status().Error
+			if err := setM365Off(r.Context(), &s); err != nil {
+				startErr += "; cleanup failed: " + err.Error()
+			}
+			fail(w, errors.New("Claude for Microsoft 365 could not start: "+startErr))
 			return
 		}
 		writeJSON(w, map[string]any{"settings": settingsState()})

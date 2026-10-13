@@ -21392,8 +21392,11 @@ function renderM365(s) {
   }).catch(async (e) => { prefs = await api("settings").catch(() => prefs); status(t(e.message), "err"); renderSettings(); });
   row("Claude for Microsoft 365", t("A loopback-only HTTPS gateway for the Claude add-in in Word, Excel and PowerPoint"), "",
     segs([["off", t("Off")], ["on", t("On")]], s.m365 ? "on" : "off", (v) => set(v === "on")));
-  if (!s.m365) return;
   const ms = s.m365Status || {};
+  if (!s.m365) {
+    if (ms.error) row(t("Gateway URL"), ms.error, ms.url || "https://127.0.0.1:8787");
+    return;
+  }
   const url = ms.url || "https://127.0.0.1:8787";
   row(t("Gateway URL"), ms.running ? t("Running on this computer") : (ms.error || t("The HTTPS gateway is not running")), url,
     copyBtn(url, t("Gateway URL")));

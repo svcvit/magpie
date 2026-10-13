@@ -6,10 +6,12 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/yetone/magpie/internal/access"
@@ -45,6 +47,19 @@ func TestM365CertificateCoversOnlyLoopbackAndKeepsNoCAKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !ca.PermittedDNSDomainsCritical || len(ca.PermittedDNSDomains) != 1 || ca.PermittedDNSDomains[0] != "localhost" {
+		t.Fatalf("CA DNS constraints: critical=%v domains=%v", ca.PermittedDNSDomainsCritical, ca.PermittedDNSDomains)
+	}
+	wantNetworks := map[string]bool{"127.0.0.1/32": false, "::1/128": false}
+	for _, network := range ca.PermittedIPRanges {
+		if _, ok := wantNetworks[network.String()]; !ok {
+			t.Fatalf("CA permits a non-loopback network: %s", network)
+		}
+		wantNetworks[network.String()] = true
+	}
+	if !wantNetworks["127.0.0.1/32"] || !wantNetworks["::1/128"] {
+		t.Fatalf("CA IP constraints: %v", ca.PermittedIPRanges)
+	}
 	roots := x509.NewCertPool()
 	roots.AddCert(ca)
 	for _, host := range []string{"localhost", "127.0.0.1", "::1"} {
@@ -60,6 +75,36 @@ func TestM365CertificateCoversOnlyLoopbackAndKeepsNoCAKey(t *testing.T) {
 	}
 	if matches, _ := filepath.Glob(filepath.Join(dir, "*ca*key*")); len(matches) != 0 {
 		t.Fatalf("CA private key was retained: %v", matches)
+	}
+}
+
+func TestM365TrustRemovalCommandsOnMacOSAndWindows(t *testing.T) {
+	dir := t.TempDir()
+	f := m365CertificateFiles{caCert: filepath.Join(dir, "ca.pem"), serverCert: filepath.Join(dir, "server.pem"), serverKey: filepath.Join(dir, "server-key.pem")}
+	if err := ensureM365Certificate(f); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := m365CertificateFingerprint(f.caCert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		goos, wantName string
+		wantArgs       []string
+	}{
+		{"darwin", "/usr/bin/security", []string{"delete-certificate", "-Z", fingerprint, "/tmp/login.keychain-db"}},
+		{"windows", "certutil", []string{"-user", "-delstore", "Root", fingerprint}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.goos, func(t *testing.T) {
+			old := macKeychain
+			macKeychain = func(context.Context) (string, error) { return "/tmp/login.keychain-db", nil }
+			t.Cleanup(func() { macKeychain = old })
+			name, args, err := m365TrustCommand(context.Background(), tt.goos, false, f.caCert)
+			if err != nil || name != tt.wantName || !slices.Equal(args, tt.wantArgs) {
+				t.Fatalf("command = %q %q, %v; want %q %q", name, args, err, tt.wantName, tt.wantArgs)
+			}
+		})
 	}
 }
 
@@ -99,6 +144,25 @@ func TestM365HTTPSListenerAndRouteBoundary(t *testing.T) {
 		if res.StatusCode != tc.want {
 			t.Errorf("%s %s = %d, want %d", tc.method, tc.path, res.StatusCode, tc.want)
 		}
+	}
+}
+
+func TestM365PortInUseIsKeptInStatus(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	old := m365ListenAddr
+	m365ListenAddr = ln.Addr().String()
+	t.Cleanup(func() { m365ListenAddr = old })
+	m := NewM365Server()
+	if err := m.Start(context.Background(), http.NotFoundHandler()); err == nil {
+		t.Fatal("start succeeded on an occupied port")
+	}
+	status := m.Status()
+	if status.Running || !strings.Contains(status.Error, m365ListenAddr) || !strings.Contains(status.Error, "address already in use") {
+		t.Fatalf("status did not explain the occupied port: %+v", status)
 	}
 }
 

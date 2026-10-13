@@ -42,6 +42,16 @@ type M365Server struct {
 
 func NewM365Server() *M365Server { return &M365Server{} }
 
+func (m *M365Server) ClearError() {
+	m.mu.Lock()
+	m.err = ""
+	m.mu.Unlock()
+}
+
+// SetError records a listener failure for a caller that owns lifecycle and
+// rollback, such as the Settings route after a restart attempt.
+func (m *M365Server) SetError(err error) { m.failed(err) }
+
 func (m *M365Server) failed(err error) error {
 	m.mu.Lock()
 	m.err = err.Error()
@@ -60,7 +70,7 @@ func (m *M365Server) Status() M365Status {
 // isn't trusted here: that system change is a separate, explicit action.
 func (m *M365Server) Start(ctx context.Context, handler http.Handler) error {
 	f := m365CertificatePaths()
-	if err := ensureM365Certificate(f); err != nil {
+	if err := prepareM365Certificate(ctx, f); err != nil {
 		return m.failed(err)
 	}
 	pair, err := tls.LoadX509KeyPair(f.serverCert, f.serverKey)

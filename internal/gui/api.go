@@ -455,6 +455,11 @@ type settingsJSON struct {
 	// LANURLs are a container's own addresses, not the host's: the page
 	// offers the one it was opened at instead, or says how to set it
 	LANContainer bool `json:"lanContainer,omitempty"`
+	// the optional loopback HTTPS gateway Claude for Microsoft 365 uses,
+	// and its named gateway key without the credential
+	M365Status    gateway.M365Status `json:"m365Status"`
+	M365KeyName   string             `json:"m365KeyName,omitempty"`
+	M365KeyMasked string             `json:"m365KeyMasked,omitempty"`
 	// when the Codex warm-up last started an account's window
 	CodexWarmed *time.Time `json:"codexWarmed,omitempty"`
 	// and the Claude warm-up
@@ -625,6 +630,12 @@ func settingsState() settingsJSON {
 	s.Login = autostart.Enabled()
 	if s.LAN {
 		s.LANURLs, s.LANContainer = gateway.LANURLs(), gateway.ContainerAddrs()
+	}
+	s.M365Status = m365.Status()
+	if keys, err := access.List(); err == nil {
+		if i := slices.IndexFunc(keys, func(k access.Key) bool { return k.ID == s.M365KeyID }); i >= 0 {
+			s.M365KeyName, s.M365KeyMasked = keys[i].Name, keys[i].Masked
+		}
 	}
 	s.CodexWarmed, s.ClaudeWarmed = latest(provider.CodexWarmed()), latest(provider.ClaudeWarmed())
 	s.CodexUsers = codexUsers()
@@ -1952,6 +1963,13 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			return
 		}
 		s := settings.Load()
+		// The M365 origin follows its switch. It cannot be removed while the
+		// integration is on or retained through this general-purpose setting
+		// after the integration is off.
+		origins = slices.DeleteFunc(origins, func(origin string) bool { return origin == gateway.M365Origin })
+		if s.M365 {
+			origins = append(origins, gateway.M365Origin)
+		}
 		s.CORSOrigins = origins
 		if err := settings.Save(s); err != nil {
 			fail(rw, err)

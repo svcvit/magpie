@@ -15,12 +15,12 @@ import (
 	"math/big"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
+	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -36,6 +36,8 @@ type M365CertificateStatus struct {
 type m365CertificateFiles struct {
 	caCert, serverCert, serverKey string
 }
+
+var macKeychain = defaultMacKeychain
 
 func m365CertificatePaths() m365CertificateFiles {
 	dir := filepath.Join(settings.Dir(), "m365")
@@ -66,23 +68,14 @@ func M365Certificate() M365CertificateStatus {
 // Generating it has no system effect; only this explicit action installs it.
 func InstallM365Certificate(ctx context.Context) (M365CertificateStatus, error) {
 	f := m365CertificatePaths()
-	if err := ensureM365Certificate(f); err != nil {
+	if err := prepareM365Certificate(ctx, f); err != nil {
 		return M365CertificateStatus{}, err
 	}
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		keychain, err := defaultMacKeychain(ctx)
-		if err != nil {
-			return M365CertificateStatus{}, err
-		}
-		cmd = exec.CommandContext(ctx, "security", "add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k", keychain, f.caCert)
-	case "windows":
-		cmd = exec.CommandContext(ctx, "certutil", "-user", "-addstore", "Root", f.caCert)
-	default:
-		return M365Certificate(), errors.New("automatic certificate trust is supported on macOS and Windows")
+	name, args, err := m365TrustCommand(ctx, runtime.GOOS, true, f.caCert)
+	if err != nil {
+		return M365Certificate(), err
 	}
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := proc.CommandContext(ctx, name, args...).CombinedOutput(); err != nil {
 		return M365Certificate(), commandError("install local certificate", err, out)
 	}
 	s := M365Certificate()
@@ -92,30 +85,70 @@ func InstallM365Certificate(ctx context.Context) (M365CertificateStatus, error) 
 	return s, nil
 }
 
+// prepareM365Certificate removes an older unconstrained CA before replacing
+// its files. Otherwise upgrading would leave that old trust anchor installed.
+func prepareM365Certificate(ctx context.Context, f m365CertificateFiles) error {
+	if m365CertificateFilesValid(f) {
+		return nil
+	}
+	if m365CertificateTrusted(f.caCert) {
+		name, args, err := m365TrustCommand(ctx, runtime.GOOS, false, f.caCert)
+		if err != nil {
+			return fmt.Errorf("remove the old local certificate before replacing it: %w", err)
+		}
+		if out, err := proc.CommandContext(ctx, name, args...).CombinedOutput(); err != nil {
+			return commandError("remove the old local certificate before replacing it", err, out)
+		}
+	}
+	return ensureM365Certificate(f)
+}
+
 // RemoveM365Certificate removes magpie's local CA from this user's trust store.
 func RemoveM365Certificate(ctx context.Context) (M365CertificateStatus, error) {
 	f := m365CertificatePaths()
-	fingerprint, err := m365CertificateFingerprint(f.caCert)
+	status := M365Certificate()
+	if !status.Ready || !status.Trusted {
+		return status, nil
+	}
+	name, args, err := m365TrustCommand(ctx, runtime.GOOS, false, f.caCert)
 	if err != nil {
-		return M365CertificateStatus{}, err
+		return status, err
 	}
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		keychain, err := defaultMacKeychain(ctx)
-		if err != nil {
-			return M365CertificateStatus{}, err
-		}
-		cmd = exec.CommandContext(ctx, "security", "delete-certificate", "-Z", fingerprint, keychain)
-	case "windows":
-		cmd = exec.CommandContext(ctx, "certutil", "-user", "-delstore", "Root", fingerprint)
-	default:
-		return M365Certificate(), errors.New("automatic certificate removal is supported on macOS and Windows")
-	}
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := proc.CommandContext(ctx, name, args...).CombinedOutput(); err != nil {
 		return M365Certificate(), commandError("remove local certificate", err, out)
 	}
 	return M365Certificate(), nil
+}
+
+// m365TrustCommand is kept pure so both supported operating systems' trust
+// removal can be checked without changing the machine running the tests.
+func m365TrustCommand(ctx context.Context, goos string, install bool, caCert string) (string, []string, error) {
+	switch goos {
+	case "darwin":
+		keychain, err := macKeychain(ctx)
+		if err != nil {
+			return "", nil, err
+		}
+		if install {
+			return "/usr/bin/security", []string{"add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k", keychain, caCert}, nil
+		}
+		fingerprint, err := m365CertificateFingerprint(caCert)
+		if err != nil {
+			return "", nil, err
+		}
+		return "/usr/bin/security", []string{"delete-certificate", "-Z", fingerprint, keychain}, nil
+	case "windows":
+		if install {
+			return "certutil", []string{"-user", "-addstore", "Root", caCert}, nil
+		}
+		fingerprint, err := m365CertificateFingerprint(caCert)
+		if err != nil {
+			return "", nil, err
+		}
+		return "certutil", []string{"-user", "-delstore", "Root", fingerprint}, nil
+	default:
+		return "", nil, errors.New("automatic certificate trust management is supported on macOS and Windows")
+	}
 }
 
 func ensureM365Certificate(f m365CertificateFiles) error {
@@ -134,11 +167,18 @@ func ensureM365Certificate(f m365CertificateFiles) error {
 	if err != nil {
 		return err
 	}
+	_, ipv4, _ := net.ParseCIDR("127.0.0.1/32")
+	_, ipv6, _ := net.ParseCIDR("::1/128")
 	caTpl := &x509.Certificate{
 		SerialNumber: caSerial, Subject: pkix.Name{CommonName: "Magpie M365 Local CA", Organization: []string{"Magpie"}},
 		NotBefore: now.Add(-time.Hour), NotAfter: now.AddDate(5, 0, 0),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
-		BasicConstraintsValid: true, IsCA: true, MaxPathLen: 0,
+		KeyUsage:                    x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid:       true,
+		IsCA:                        true,
+		MaxPathLen:                  0,
+		PermittedDNSDomainsCritical: true,
+		PermittedDNSDomains:         []string{"localhost"},
+		PermittedIPRanges:           []*net.IPNet{ipv4, ipv6},
 	}
 	caDER, err := x509.CreateCertificate(rand.Reader, caTpl, caTpl, &caKey.PublicKey, caKey)
 	if err != nil {
@@ -194,13 +234,27 @@ func m365CertificateFilesValid(f m365CertificateFiles) bool {
 		return false
 	}
 	ca, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
+	if err != nil || !m365CAConstrained(ca) {
 		return false
 	}
 	pool := x509.NewCertPool()
 	pool.AddCert(ca)
 	_, err = server.Verify(x509.VerifyOptions{DNSName: "localhost", Roots: pool})
 	return err == nil
+}
+
+func m365CAConstrained(ca *x509.Certificate) bool {
+	if !ca.PermittedDNSDomainsCritical || len(ca.PermittedDNSDomains) != 1 || ca.PermittedDNSDomains[0] != "localhost" || len(ca.PermittedIPRanges) != 2 {
+		return false
+	}
+	want := map[string]bool{"127.0.0.1/32": false, "::1/128": false}
+	for _, network := range ca.PermittedIPRanges {
+		if _, ok := want[network.String()]; !ok {
+			return false
+		}
+		want[network.String()] = true
+	}
+	return want["127.0.0.1/32"] && want["::1/128"]
 }
 
 func m365Serial() (*big.Int, error) {
@@ -230,16 +284,8 @@ func writeM365PEM(path, typ string, data []byte, mode os.FileMode) error {
 }
 
 func m365CertificateTrusted(path string) bool {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	block, _ := pem.Decode(b)
-	if block == nil {
-		return false
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
+	cert, ok := readM365Certificate(path)
+	if !ok {
 		return false
 	}
 	roots, err := x509.SystemCertPool()
@@ -248,6 +294,22 @@ func m365CertificateTrusted(path string) bool {
 	}
 	_, err = cert.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}})
 	return err == nil
+}
+
+func readM365Certificate(path string) (*x509.Certificate, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	block, _ := pem.Decode(b)
+	if block == nil {
+		return nil, false
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, false
+	}
+	return cert, true
 }
 
 func m365CertificateFingerprint(path string) (string, error) {
@@ -264,7 +326,7 @@ func m365CertificateFingerprint(path string) (string, error) {
 }
 
 func defaultMacKeychain(ctx context.Context) (string, error) {
-	out, err := exec.CommandContext(ctx, "security", "default-keychain", "-d", "user").Output()
+	out, err := proc.CommandContext(ctx, "/usr/bin/security", "default-keychain", "-d", "user").Output()
 	if err != nil {
 		return "", fmt.Errorf("find the default macOS keychain: %w", err)
 	}
