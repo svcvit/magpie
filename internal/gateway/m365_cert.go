@@ -138,7 +138,7 @@ func m365TrustCommand(ctx context.Context, goos string, install bool, caCert str
 		if err != nil {
 			return "", nil, err
 		}
-		return "/usr/bin/security", []string{"delete-certificate", "-Z", fingerprint, keychain}, nil
+		return "/usr/bin/security", []string{"delete-certificate", "-t", "-Z", fingerprint, keychain}, nil
 	case "windows":
 		if install {
 			return "certutil", []string{"-user", "-addstore", "Root", caCert}, nil

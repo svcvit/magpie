@@ -460,6 +460,10 @@ type settingsJSON struct {
 	M365Status    gateway.M365Status `json:"m365Status"`
 	M365KeyName   string             `json:"m365KeyName,omitempty"`
 	M365KeyMasked string             `json:"m365KeyMasked,omitempty"`
+	// M365CertificateActions is intentionally macOS-only until installing,
+	// using and removing the CA has been exercised with the real add-in on
+	// Windows. Other systems show the certificate for manual trust instead.
+	M365CertificateActions bool `json:"m365CertificateActions,omitempty"`
 	// when the Codex warm-up last started an account's window
 	CodexWarmed *time.Time `json:"codexWarmed,omitempty"`
 	// and the Claude warm-up
@@ -601,6 +605,7 @@ func settingsState() settingsJSON {
 		s.PublicURL = gateway.PublicURL()
 	}
 	s.WSL = runtime.GOOS == "windows"
+	s.M365CertificateActions = m365AutomaticTrust
 	s.Web = webPage.Load()
 	s.GatewayOn, s.GatewayWhy = gatewayMode(s.Web)
 	s.LANKey = "" // the retained credential belongs on disk, not in UI state

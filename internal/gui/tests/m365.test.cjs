@@ -8,13 +8,21 @@ const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
-function payload(lang, on = false) {
+const words = {
+  en: { on: "On", trust: "Trust certificate", copy: "Copy key" },
+  zh: { on: "开启", trust: "信任证书", copy: "复制密钥" },
+  "zh-TW": { on: "開啟", trust: "信任憑證", copy: "複製金鑰" },
+  ja: { on: "オン", trust: "証明書を信頼", copy: "キーをコピー" },
+  de: { on: "An", trust: "Zertifikat vertrauen", copy: "Schlüssel kopieren" },
+};
+function payload(lang, on = false, certificateActions = true) {
   return {
     theme: "light", lang, tray: "panel", quotaLeft: false, currency: "usd", proxy: "", proxyNow: "none", proxySource: "none",
     version: "0.1.400", dir: "/config/magpie", gateway: "http://127.0.0.1:3425", login: false,
     visionModels: [], imageGenModels: [], workbuddyCheckins: [], lan: false, lanURLs: [], corsOrigins: on ? ["https://pivot.claude.ai"] : [],
     fx: { rate: 7.2, at: new Date().toISOString(), stale: false }, m365: on, m365KeyName: on ? "Claude for Microsoft 365" : "",
-    m365KeyMasked: on ? "sk-magpie-key-…abcdef" : "", m365Status: { running: on, url: "https://127.0.0.1:8787", certificate: { ready: on, trusted: false, message: "Trust the local certificate before connecting from Microsoft 365" } },
+    m365KeyMasked: on ? "sk-magpie-key-…abcdef" : "", m365CertificateActions: certificateActions,
+    m365Status: { running: on, url: "https://127.0.0.1:8787", certificate: { ready: on, trusted: false, certificate: "/config/magpie/m365/local-ca.pem", message: "Trust the local certificate before connecting from Microsoft 365" } },
   };
 }
 function server(lang, calls) {
@@ -41,22 +49,33 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
   test(engine + ": Microsoft 365 HTTPS setup", async (t) => {
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch(process.env.CHROME ? { executablePath: process.env.CHROME } : { channel: "chromium" }));
     t.after(() => browser.close());
-    for (const lang of ["en", "zh"]) await t.test(lang, async () => {
+    for (const lang of Object.keys(words)) await t.test(lang, async () => {
       const calls = [], page = await (await browser.newContext({ viewport: { width: 440, height: 650 }, reducedMotion: "reduce" })).newPage();
       await page.route("**/*", server(lang, calls));
       await page.goto("http://127.0.0.1:4999/?view=settings&tab=network");
       const box = page.locator("#m365List");
       await box.getByText("Claude for Microsoft 365", { exact: true }).waitFor();
-      await box.getByRole("button", { name: lang === "zh" ? "开启" : "On", exact: true }).click();
+      await box.getByRole("button", { name: words[lang].on, exact: true }).click();
       await box.getByText("https://127.0.0.1:8787", { exact: true }).waitFor();
       assert.equal(await box.locator("code").filter({ hasText: "sk-magpie-key" }).textContent(), "sk-magpie-key-…abcdef");
-      const trust = lang === "zh" ? "信任证书" : "Trust certificate";
+      const trust = words[lang].trust;
       assert.equal(await box.getByRole("button", { name: trust }).count(), 1);
-      await box.getByRole("button", { name: lang === "zh" ? "复制密钥" : "Copy key" }).click();
-      await page.waitForFunction(() => document.body.textContent.includes("copied") || document.body.textContent.includes("已复制"));
+      const copy = box.getByRole("button", { name: words[lang].copy });
+      // Settings has grown past this narrow window. WebKit leaves the fixed
+      // footer over the button even after scrollIntoView; invoke the visible
+      // button's click handler rather than bypassing the product path.
+      await copy.evaluate((button) => button.click());
+      await page.waitForFunction(() => document.querySelector("#status")?.textContent);
       assert(calls.includes("key"));
       assert(calls.includes("copy:sk-magpie-key-fixture"));
       assert.equal((await page.locator("html").evaluate((e) => e.scrollWidth <= e.clientWidth)), true);
+
+      // Until a real Windows Office run verifies certutil end to end, a
+      // non-macOS UI gives the certificate path instead of trust actions.
+      await page.route("**/api/settings", (route) => route.fulfill({ json: payload(lang, true, false) }));
+      await page.reload();
+      await box.getByText("/config/magpie/m365/local-ca.pem", { exact: true }).waitFor();
+      assert.equal(await box.getByRole("button", { name: trust }).count(), 0);
     });
   });
 }

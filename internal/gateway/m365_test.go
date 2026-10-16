@@ -92,7 +92,7 @@ func TestM365TrustRemovalCommandsOnMacOSAndWindows(t *testing.T) {
 		goos, wantName string
 		wantArgs       []string
 	}{
-		{"darwin", "/usr/bin/security", []string{"delete-certificate", "-Z", fingerprint, "/tmp/login.keychain-db"}},
+		{"darwin", "/usr/bin/security", []string{"delete-certificate", "-t", "-Z", fingerprint, "/tmp/login.keychain-db"}},
 		{"windows", "certutil", []string{"-user", "-delstore", "Root", fingerprint}},
 	}
 	for _, tt := range tests {
